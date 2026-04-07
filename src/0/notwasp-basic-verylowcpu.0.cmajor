@@ -1,82 +1,60 @@
-// something is not right here whatsoever,, gotta take a look at other peoples ones... 
-
 processor wasp_core [[ main ]]
 {
-    input event std::midi::Message midi_in;
+    // === REQUIRED OUTPUTS ===
+    output stream float<2> out;
+    output event float debugPlayOut;
+    output event float debugTempoOut;
+    output event float debugPPQOut;
+    output event float debugStepErrorOut;
+    output event float debugSlotsOut;
     
-    // === AUTO-UI PARAMETERS ===
-    input value float osc1_fine   [[ name: "Osc 1 Fine", min: -100, max: 100, init: 0 ]];
-    input value float fm_amount   [[ name: "FM Amount",  min: 0,    max: 1,   init: 0.22 ]];
-    input value float drive       [[ name: "Drive",      min: 0,    max: 2,   init: 1.0 ]];
-    input value float pulse_width [[ name: "Pulse Width",min: 0.05, max: 0.95, init: 0.5 ]];
-    
-    input value float att [[ name: "Attack",  min: 0.001, max: 2.0, init: 0.01 ]];
-    input value float dec [[ name: "Decay",   min: 0.001, max: 2.0, init: 0.1 ]];
-    input value float sus [[ name: "Sustain", min: 0.0,   max: 1.0, init: 0.7 ]];
-    input value float rel [[ name: "Release", min: 0.001, max: 3.0, init: 0.5 ]];
+    // === REQUIRED INPUTS ===
+    input event std::midi::Message midiIn;
+    input event float transportIn;
 
-    output stream float audio_out;
+    input event float param1  [[ name: "Osc 1 Fine", min: -100, max: 100, init: 0 ]];
+    input event float param2  [[ name: "FM Amount",  min: 0,    max: 1,   init: 0.22 ]];
+    input event float param3  [[ name: "Drive",      min: 0,    max: 2,   init: 1.0 ]];
+    input event float param4  [[ name: "Pulse Width",min: 0.05, max: 0.95, init: 0.5 ]];
+    input event float param5  [[ name: "Attack",     min: 0.001,max: 2.0, init: 0.01 ]];
+    input event float param6  [[ name: "Decay",      min: 0.001,max: 2.0, init: 0.1 ]];
+    input event float param7  [[ name: "Sustain",    min: 0.0,  max: 1.0, init: 0.7 ]];
+    input event float param8  [[ name: "Release",    min: 0.001,max: 3.0, init: 0.5 ]];
+    input event float param9  [[ name: "Cutoff",     min: 0.0,  max: 1.0, init: 0.8 ]];
 
-    // Renamed internal states to avoid name-clashing with inputs
+    // Internal Engine Variables
+    float osc1_fine= 0.0f;
+    float fm_amount= 0.22f;
+    float drive= 1.0f;
+    float pulse_width= 0.5f;
+    float att= 0.01f;
+    float dec= 0.1f;
+    float sus= 0.7f;
+    float rel= 0.5f;
+    float base_cut= 0.8f;
+
     float phase1, phase2, current_pitch, env_level;
     int env_state; // 0=IDLE, 1=ATTACK, 2=DECAY, 3=SUSTAIN, 4=RELEASE
     
     float last_out_sample, dc_block_state, filter_memory;
 
-    void main()
-    {
-        loop
-        {
-            float hz= float(processor.frequency);
+    // === PARAMETER BINDINGS ===
+    event param1 (float v) { osc1_fine= v; }
+    event param2 (float v) { fm_amount= v; }
+    event param3 (float v) { drive= v; }
+    event param4 (float v) { pulse_width= v; }
+    event param5 (float v) { att= v; }
+    event param6 (float v) { dec= v; }
+    event param7 (float v) { sus= v; }
+    event param8 (float v) { rel= v; }
+    event param9 (float v) { base_cut= v; }
 
-            // 1. THE ADSR STATE MACHINE
-            if (env_state == 1) // ATTACK
-            {
-                env_level += 1.0f / (att * hz);
-                if (env_level >= 1.0f) { env_level= 1.0f; env_state= 2; }
-            }
-            else if (env_state == 2) // DECAY
-            {
-                env_level -= (1.0f - sus) / (dec * hz);
-                if (env_level <= sus) { env_level= sus; env_state= 3; }
-            }
-            else if (env_state == 4) // RELEASE
-            {
-                env_level -= sus / (rel * hz);
-                if (env_level <= 0.0f) { env_level= 0.0f; env_state= 0; }
-            }
-
-            // 2. OSCILLATORS
-            float pitch_mult= pow(1.059463f, osc1_fine / 100.0f);
-            float final_f= current_pitch * pitch_mult;
-            float safe_f= clamp(final_f, 0.0f, hz * 0.45f);
-            
-            phase1= (phase1 + (safe_f / hz)) % 1.0f;
-            float s1= (phase1 * 2.0f) - 1.0f;
-
-            // Using fm_amount directly from input
-            float mod_f= clamp(safe_f * (1.005f + (s1 * fm_amount)), 0.0f, hz * 0.48f);
-            phase2= (phase2 + (mod_f / hz)) % 1.0f;
-            float s2= (phase2 > pulse_width) ? 0.35f : -0.35f;
-
-            // 3. MIX & SATURATION
-            float raw_mix= (s1 + s2) * drive;
-            float saturated= clamp(raw_mix - (raw_mix * raw_mix * raw_mix * 0.333f), -0.8f, 0.8f);
-
-            // 4. FILTER (Hooked to Envelope)
-            float cut= 0.05f + (env_level * 0.35f); 
-            filter_memory += cut * (saturated - filter_memory);
-
-            // 5. DC BLOCKER & OUTPUT
-            dc_block_state= filter_memory - last_out_sample + (0.995f * dc_block_state);
-            last_out_sample= filter_memory;
-
-            audio_out <- dc_block_state * env_level * 0.25f;
-            advance();
-        }
+    event transportIn (float v) 
+    { 
+        // Absorbing host sync data to satisfy without derailing the Wasp
     }
 
-    event midi_in (std::midi::Message m)
+    event midiIn (std::midi::Message m)
     {
         if (m.isNoteOn()) 
         { 
@@ -86,6 +64,63 @@ processor wasp_core [[ main ]]
         else if (m.isNoteOff()) 
         { 
             env_state= 4; 
+        }
+    }
+
+    void main()
+    {
+        loop
+        {
+            float hz= float(processor.frequency);
+
+            // 1. THE ADSR STATE MACHINE
+            if (env_state == 1)
+            {
+                env_level= env_level + (1.0f / (att * hz));
+                if (env_level >= 1.0f) { env_level= 1.0f; env_state= 2; }
+            }
+            else if (env_state == 2)
+            {
+                env_level= env_level - ((1.0f - sus) / (dec * hz));
+                if (env_level <= sus) { env_level= sus; env_state= 3; }
+            }
+            else if (env_state == 4)
+            {
+                env_level= env_level - (sus / (rel * hz));
+                if (env_level <= 0.0f) { env_level= 0.0f; env_state= 0; }
+            }
+
+            // 2. OSCILLATORS
+            float pitch_mult= pow(1.059463f, osc1_fine / 100.0f);
+            float final_f= current_pitch * pitch_mult;
+            float safe_f= clamp(final_f, 0.0f, hz * 0.45f);
+            
+            phase1= phase1 + (safe_f / hz);
+            if (phase1 >= 1.0f) { phase1= phase1 - 1.0f; }
+            float s1= (phase1 * 2.0f) - 1.0f;
+
+            float mod_f= clamp(safe_f * (1.005f + (s1 * fm_amount)), 0.0f, hz * 0.48f);
+            phase2= phase2 + (mod_f / hz);
+            if (phase2 >= 1.0f) { phase2= phase2 - 1.0f; }
+            float s2= (phase2 > pulse_width) ? 0.35f : -0.35f;
+
+            // 3. MIX & SATURATION
+            float raw_mix= (s1 + s2) * drive;
+            float saturated= clamp(raw_mix - (raw_mix * raw_mix * raw_mix * 0.333f), -0.8f, 0.8f);
+
+            // 4. FILTER
+            float cut= 0.05f + (env_level * base_cut * 0.35f); 
+            filter_memory= filter_memory + cut * (saturated - filter_memory);
+
+            // 5. DC BLOCKER
+            dc_block_state= filter_memory - last_out_sample + (0.995f * dc_block_state);
+            last_out_sample= filter_memory;
+
+            float final_mono= dc_block_state * env_level * 0.25f;
+
+            // 6. STEREO OUTPUT BINDING
+            out <- float<2>(final_mono, final_mono);
+            advance();
         }
     }
 }
