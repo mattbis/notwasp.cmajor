@@ -1,56 +1,77 @@
+// something is not right here whatsoever,, gotta take a look at other peoples ones... 
+
 processor wasp_core [[ main ]]
 {
     input event std::midi::Message midi_in;
     
-    // === AMORPH INPUT PORTS ===
-    // Swapping "external" for "input value" to satisfy the resolver
+    // === AUTO-UI PARAMETERS ===
     input value float osc1_fine   [[ name: "Osc 1 Fine", min: -100, max: 100, init: 0 ]];
     input value float fm_amount   [[ name: "FM Amount",  min: 0,    max: 1,   init: 0.22 ]];
     input value float drive       [[ name: "Drive",      min: 0,    max: 2,   init: 1.0 ]];
     input value float pulse_width [[ name: "Pulse Width",min: 0.05, max: 0.95, init: 0.5 ]];
+    
+    input value float att [[ name: "Attack",  min: 0.001, max: 2.0, init: 0.01 ]];
+    input value float dec [[ name: "Decay",   min: 0.001, max: 2.0, init: 0.1 ]];
+    input value float sus [[ name: "Sustain", min: 0.0,   max: 1.0, init: 0.7 ]];
+    input value float rel [[ name: "Release", min: 0.001, max: 3.0, init: 0.5 ]];
 
     output stream float audio_out;
 
-    float p1, p2, target_f, amp;
-    bool gate;
-    float last_out, dc_filter;
+    // Renamed internal states to avoid name-clashing with inputs
+    float phase1, phase2, current_pitch, env_level;
+    int env_state; // 0=IDLE, 1=ATTACK, 2=DECAY, 3=SUSTAIN, 4=RELEASE
+    
+    float last_out_sample, dc_block_state, filter_memory;
 
     void main()
     {
         loop
         {
-            // 1. Tuning math
-            float fine_mult= pow (1.059463f, osc1_fine / 100.0f);
-            float current_f= target_f * fine_mult;
+            float hz= float(processor.frequency);
 
-            // 2. Envelope
-            if (gate) { if (amp < 1.0f) { amp= amp + 0.0008f; } }
-            else { if (amp > 0.0f) { amp= amp - 0.0004f; } }
+            // 1. THE ADSR STATE MACHINE
+            if (env_state == 1) // ATTACK
+            {
+                env_level += 1.0f / (att * hz);
+                if (env_level >= 1.0f) { env_level= 1.0f; env_state= 2; }
+            }
+            else if (env_state == 2) // DECAY
+            {
+                env_level -= (1.0f - sus) / (dec * hz);
+                if (env_level <= sus) { env_level= sus; env_state= 3; }
+            }
+            else if (env_state == 4) // RELEASE
+            {
+                env_level -= sus / (rel * hz);
+                if (env_level <= 0.0f) { env_level= 0.0f; env_state= 0; }
+            }
 
-            // 3. OSC 1 (Saw)
-            float safe_f= clamp (current_f, 0.0f, float (processor.frequency) * 0.45f);
-            float inc1= safe_f / float (processor.frequency);
-            p1= (p1 + inc1) % 1.0f;
-            float s1= (p1 * 2.0f) - 1.0f;
-
-            // 4. OSC 2 (Carrier with FM)
-            float mod_f= clamp (safe_f * (1.005f + (s1 * fm_amount)), 0.0f, float (processor.frequency) * 0.48f);
-            float inc2= mod_f / float (processor.frequency);
-            p2= (p2 + inc2) % 1.0f;
+            // 2. OSCILLATORS
+            float pitch_mult= pow(1.059463f, osc1_fine / 100.0f);
+            float final_f= current_pitch * pitch_mult;
+            float safe_f= clamp(final_f, 0.0f, hz * 0.45f);
             
-            // Pulse Width
-            float s2= (p2 > pulse_width) ? 0.35f : -0.35f;
+            phase1= (phase1 + (safe_f / hz)) % 1.0f;
+            float s1= (phase1 * 2.0f) - 1.0f;
 
-            // 5. THE STING (Saturation)
-            float mixed= (s1 + s2) * drive;
-            float saturated= mixed - (mixed * mixed * mixed * 0.333f);
+            // Using fm_amount directly from input
+            float mod_f= clamp(safe_f * (1.005f + (s1 * fm_amount)), 0.0f, hz * 0.48f);
+            phase2= (phase2 + (mod_f / hz)) % 1.0f;
+            float s2= (phase2 > pulse_width) ? 0.35f : -0.35f;
 
-            // 6. DC BLOCKER
-            dc_filter= saturated - last_out + (0.995f * dc_filter);
-            last_out= saturated;
+            // 3. MIX & SATURATION
+            float raw_mix= (s1 + s2) * drive;
+            float saturated= clamp(raw_mix - (raw_mix * raw_mix * raw_mix * 0.333f), -0.8f, 0.8f);
 
-            // Master pad for the 40-instance empire
-            audio_out <- dc_filter * amp * 0.2f;
+            // 4. FILTER (Hooked to Envelope)
+            float cut= 0.05f + (env_level * 0.35f); 
+            filter_memory += cut * (saturated - filter_memory);
+
+            // 5. DC BLOCKER & OUTPUT
+            dc_block_state= filter_memory - last_out_sample + (0.995f * dc_block_state);
+            last_out_sample= filter_memory;
+
+            audio_out <- dc_block_state * env_level * 0.25f;
             advance();
         }
     }
@@ -59,9 +80,12 @@ processor wasp_core [[ main ]]
     {
         if (m.isNoteOn()) 
         { 
-            target_f= 440.0f * pow (2.0f, (float (std::midi::getByte2 (m)) - 69.0f) / 12.0f);
-            gate= true; 
+            current_pitch= 440.0f * pow(2.0f, (float(std::midi::getByte2(m)) - 69.0f) / 12.0f);
+            env_state= 1; 
         }
-        else if (m.isNoteOff()) { gate= false; }
+        else if (m.isNoteOff()) 
+        { 
+            env_state= 4; 
+        }
     }
 }
