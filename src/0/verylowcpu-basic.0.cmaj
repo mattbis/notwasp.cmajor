@@ -1,0 +1,67 @@
+processor wasp_core [[ main ]]
+{
+    input event std::midi::Message midi_in;
+    
+    // === AMORPH INPUT PORTS ===
+    // Swapping "external" for "input value" to satisfy the resolver
+    input value float osc1_fine   [[ name: "Osc 1 Fine", min: -100, max: 100, init: 0 ]];
+    input value float fm_amount   [[ name: "FM Amount",  min: 0,    max: 1,   init: 0.22 ]];
+    input value float drive       [[ name: "Drive",      min: 0,    max: 2,   init: 1.0 ]];
+    input value float pulse_width [[ name: "Pulse Width",min: 0.05, max: 0.95, init: 0.5 ]];
+
+    output stream float audio_out;
+
+    float p1, p2, target_f, amp;
+    bool gate;
+    float last_out, dc_filter;
+
+    void main()
+    {
+        loop
+        {
+            // 1. Tuning math
+            float fine_mult= pow (1.059463f, osc1_fine / 100.0f);
+            float current_f= target_f * fine_mult;
+
+            // 2. Envelope
+            if (gate) { if (amp < 1.0f) { amp= amp + 0.0008f; } }
+            else { if (amp > 0.0f) { amp= amp - 0.0004f; } }
+
+            // 3. OSC 1 (Saw)
+            float safe_f= clamp (current_f, 0.0f, float (processor.frequency) * 0.45f);
+            float inc1= safe_f / float (processor.frequency);
+            p1= (p1 + inc1) % 1.0f;
+            float s1= (p1 * 2.0f) - 1.0f;
+
+            // 4. OSC 2 (Carrier with FM)
+            float mod_f= clamp (safe_f * (1.005f + (s1 * fm_amount)), 0.0f, float (processor.frequency) * 0.48f);
+            float inc2= mod_f / float (processor.frequency);
+            p2= (p2 + inc2) % 1.0f;
+            
+            // Pulse Width
+            float s2= (p2 > pulse_width) ? 0.35f : -0.35f;
+
+            // 5. THE STING (Saturation)
+            float mixed= (s1 + s2) * drive;
+            float saturated= mixed - (mixed * mixed * mixed * 0.333f);
+
+            // 6. DC BLOCKER
+            dc_filter= saturated - last_out + (0.995f * dc_filter);
+            last_out= saturated;
+
+            // Master pad for the 40-instance empire
+            audio_out <- dc_filter * amp * 0.2f;
+            advance();
+        }
+    }
+
+    event midi_in (std::midi::Message m)
+    {
+        if (m.isNoteOn()) 
+        { 
+            target_f= 440.0f * pow (2.0f, (float (std::midi::getByte2 (m)) - 69.0f) / 12.0f);
+            gate= true; 
+        }
+        else if (m.isNoteOff()) { gate= false; }
+    }
+}
